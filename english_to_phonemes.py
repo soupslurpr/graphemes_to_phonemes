@@ -232,6 +232,7 @@ if mode == 'train':
 
     training_args = Seq2SeqTrainingArguments(
         output_dir=model_dir,
+        torch_compile=True,
         num_train_epochs=2000,
         per_device_train_batch_size=2048,
         learning_rate=5e-4,
