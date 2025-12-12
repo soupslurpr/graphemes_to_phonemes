@@ -2,41 +2,43 @@
 # python thisscript.py train
 # python thisscript.py run Example
 
-import os
 import json
+import re
+import sys
+
+import torch
 from datasets import Dataset
+from torch import nn, Tensor
+from torch.export import Dim
 from transformers import (
     BartForConditionalGeneration,
     BartConfig,
     Seq2SeqTrainingArguments,
     Seq2SeqTrainer,
     DataCollatorForSeq2Seq,
-    PreTrainedTokenizer,
-)
-import numpy as np
-import sys
-import torch
-import re
+    PreTrainedTokenizer, )
 
-british = True
+british = False
 if british:
-    gold_dataset_path = "./gb_gold.json"
-    silver_dataset_path = "./gb_silver.json"
-    model_dir = "./en_gb_model"
+    gold_dataset_path = "../misaki/misaki/data/gb_gold.json"
+    model_dir = "./en-GB_model_training"
+    onnx_path = "en-GB_g2p.onnx"
 else:
-    gold_dataset_path = "./us_gold.json" 
-    silver_dataset_path = "./us_silver.json" 
-    model_dir = "./en_us_model"
+    gold_dataset_path = "../misaki/misaki/data/us_gold.json"
+    model_dir = "./en-US_model_training"
+    onnx_path = "en-US_g2p.onnx"
+
 
 # This is designed to load the datasets from `misaki`.
 def load_dataset(path):
-    with open(path) as f: 
+    with open(path) as f:
         j = json.loads(f.read())
     dataset = []
     for english, phonemes in j.items():
         if type(phonemes) == str:
             dataset.append((english, phonemes))
     return dataset
+
 
 # Convert a grapheme `word`, if it is plural, to its phonemes.
 # The requires that its singular pronounciation be in phoneme_lookup and that it follows "regular" pluralization rules.
@@ -61,6 +63,7 @@ def get_plural_phonemes(word, phoneme_lookup):
         return stem_phonemes + ('ɪ' if british else 'ᵻ') + 'z'
     return stem_phonemes + 'z'
 
+
 # The dataset does not have regular plural versions of words, but the model does need
 # to be able to handle that. To get examples of plural words that are actually used,
 # we ingest a large text file and check if each word is a plural of a known-good word.
@@ -83,6 +86,7 @@ def augment_dataset(dataset, text_file):
                     added.add(word)
     return extra_dataset
 
+
 def vocab_for_data(dataset):
     grapheme_chars = set()
     phoneme_chars = set()
@@ -102,6 +106,7 @@ def vocab_for_data(dataset):
     phoneme_chars = sorted(list(chars_in_common)) + sorted(list(only_phoneme))
     return grapheme_chars, phoneme_chars
 
+
 # This model uses character-level tokenization. The only oddity is that, since the
 # input and output characters come from different sets, we re-use token indices between
 # the two.
@@ -109,6 +114,7 @@ class CharTokenizer(PreTrainedTokenizer):
     """
     A very simple character-level tokenizer.
     """
+
     def __init__(self, grapheme_chars, phoneme_chars):
         self.bos_token = "<s>"
         self.eos_token = "</s>"
@@ -123,7 +129,7 @@ class CharTokenizer(PreTrainedTokenizer):
         phoneme_vocab_list = special_vocab + phoneme_chars
         print(grapheme_vocab_list)
         print(phoneme_vocab_list)
-        
+
         vocab = {token: idx for idx, token in enumerate(grapheme_vocab_list)}
         vocab.update({token: idx for idx, token in enumerate(phoneme_vocab_list)})
         self.vocab = vocab
@@ -132,18 +138,18 @@ class CharTokenizer(PreTrainedTokenizer):
         self.ids_to_phonemes = {i: t for i, t in enumerate(phoneme_vocab_list)}
         self.ids_to_graphemes = {i: t for i, t in enumerate(grapheme_vocab_list)}
         super().__init__()
-    
+
     def _tokenize(self, text):
         # Split text into characters.
         return list(text)
-    
+
     def _convert_token_to_id(self, token):
         return self.vocab.get(token, self.vocab.get("<unk>"))
-    
+
     def convert_tokens_to_string(self, tokens):
         # Rejoin tokens as a string.
         return "".join(tokens)
-   
+
     def decode_phonemes(self, tokens):
         return "".join([self.ids_to_phonemes.get(token, "<unk>") for token in tokens.tolist() if token > 3])
 
@@ -156,12 +162,14 @@ class CharTokenizer(PreTrainedTokenizer):
             return [self.bos_token_id] + token_ids_0 + [self.eos_token_id]
         # For sequence pair, you can define your own method.
         return [self.bos_token_id] + token_ids_0 + [self.eos_token_id] + token_ids_1 + [self.eos_token_id]
-    
+
     @property
     def vocab_size(self):
         return 4 + max(len(self.ids_to_phonemes), len(self.ids_to_graphemes))
+
     def get_vocab(self):
         return self.vocab
+
     def save_vocabulary(self, save_directory, filename_prefix=None):
         return ()
 
@@ -174,40 +182,46 @@ def encode_example(example):
     target_ids = tokenizer.encode(target)
     return {"input_ids": source_ids, "labels": target_ids}
 
+
+def get_runtime_tokenizer(config):
+    # grapheme_chars and phoneme_chars start with "____" for the convenience of the runtime version of this.
+    return CharTokenizer(list(config.grapheme_chars.lstrip('_')), list(config.phoneme_chars.lstrip('_')))
+
+
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 mode = sys.argv[1]
 if mode == 'train':
     gold_data = load_dataset(gold_dataset_path)
-    silver_data = load_dataset(silver_dataset_path)
-    grapheme_chars, phoneme_chars = vocab_for_data(gold_data + silver_data)
-    training_data = gold_data + [d for i, d in enumerate(silver_data) if i%10 != 0]
-    eval_data = [d for i, d in enumerate(silver_data) if i%10 == 0]
-    training_data += augment_dataset(training_data, '../wiki.train.raw')
+    # silver_data = load_dataset(silver_dataset_path)
+    grapheme_chars, phoneme_chars = vocab_for_data(gold_data)
+    training_data = gold_data
+    eval_data = gold_data
+    # training_data += augment_dataset(training_data, '../wiki.train.raw')
 
     print(grapheme_chars, phoneme_chars)
     print(training_data[-20:])
     tokenizer = CharTokenizer(grapheme_chars, phoneme_chars)
-    
+
     # Tokenize all samples
     dataset = Dataset.from_list([encode_example(pair) for pair in training_data])
     eval_dataset = Dataset.from_list([encode_example(pair) for pair in eval_data])
 
     # We train a BartForConditionalGeneration from scratch.
-    # These parameters have been pretty vigorously minimized to produce a small model
+    # These parameters have been very vigorously minimized to produce a superfast tiny model
     # that still works properly.
     vocab_size = tokenizer.vocab_size
     config = BartConfig(
         vocab_size=vocab_size,
-        d_model=128,                 # hidden size
-        encoder_ffn_dim = 1024,
-        decoder_ffn_dim = 1024,
-        encoder_layers=1,           # number of encoder layers
-        decoder_layers=1,           # number of decoder layers
-        encoder_attention_heads=1,  # attention heads in encoder
-        decoder_attention_heads=1,  # attention heads in decoder
+        d_model=64,  # hidden size,
+        encoder_ffn_dim=256,
+        decoder_ffn_dim=256,
+        encoder_layers=4,  # number of encoder layers
+        decoder_layers=1,  # number of decoder layers
+        encoder_attention_heads=16,  # attention heads in encoder
+        decoder_attention_heads=16,  # attention heads in decoder
         decoder_start_token_id=tokenizer.bos_token_id,
-        max_position_embeddings = 64,
+        max_position_embeddings=64,
         bos_token_id=tokenizer.bos_token_id,
         eos_token_id=tokenizer.eos_token_id,
         pad_token_id=tokenizer.pad_token_id,
@@ -218,13 +232,15 @@ if mode == 'train':
 
     training_args = Seq2SeqTrainingArguments(
         output_dir=model_dir,
-        num_train_epochs=100,
-        per_device_train_batch_size=32,
+        num_train_epochs=2000,
+        per_device_train_batch_size=2048,
         learning_rate=5e-4,
-        logging_steps=100,
-        save_strategy = "no", # No need for checkpoint saving, since this is so small
+        logging_steps=1000,
+        save_strategy="steps",
+        save_steps=2000,
         predict_with_generate=True,
-        eval_strategy = "epoch",
+        eval_strategy="steps",
+        eval_steps=1000,
     )
 
     data_collator = DataCollatorForSeq2Seq(tokenizer, model=model)
@@ -233,19 +249,18 @@ if mode == 'train':
         model=model,
         args=training_args,
         train_dataset=dataset,
-        eval_dataset = eval_dataset,
+        eval_dataset=eval_dataset,
         tokenizer=tokenizer,
         data_collator=data_collator,
     )
-    
+
     trainer.train()
 
     model.save_pretrained(model_dir)
-    
+
 elif mode == 'run':
     model = BartForConditionalGeneration.from_pretrained(model_dir)
-    # grapheme_chars and phoneme_chars start with "____" for the convience of the runtime version of this.
-    tokenizer = CharTokenizer(list(model.config.grapheme_chars.lstrip('_')), list(model.config.phoneme_chars.lstrip('_')))
+    tokenizer = get_runtime_tokenizer(model.config)
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Total parameters: {total_params:,}")
     model.to(device)
@@ -253,10 +268,108 @@ elif mode == 'run':
 
     input_text = sys.argv[2]
     print("Running on", input_text)
-    input_ids = torch.tensor([tokenizer.encode(input_text)], device = device)
+    input_ids = torch.tensor([tokenizer.encode(input_text)], device=device)
 
     with torch.no_grad():
-        generated_ids = model.generate(input_ids = input_ids)
+        generated_ids = model.generate(input_ids=input_ids)
 
     output_text = tokenizer.decode_phonemes(generated_ids[0])
     print(f"Phonemes for '{input_text}':", output_text)
+
+elif mode == 'export':
+    import torch.onnx
+
+
+    class G2POnnxModel(nn.Module):
+        def __init__(self, model: BartForConditionalGeneration):
+            super().__init__()
+            self.model = model
+            self.config = model.config
+
+        def forward(self, input_ids: Tensor):
+            generated_ids = self.model.generate(input_ids=input_ids)
+            return generated_ids
+
+
+    model = G2POnnxModel(BartForConditionalGeneration.from_pretrained(model_dir))
+    tokenizer = get_runtime_tokenizer(model.config)
+    model.to("cpu")
+    model.eval()
+
+    # Create dummy inputs for tracing.
+    batch = 1
+    src_len = 8
+    tgt_len = 1
+    vocab_size = model.config.vocab_size
+
+    dummy_input_ids = torch.randint(low=4, high=vocab_size, size=(batch, src_len), dtype=torch.long)
+
+    batch_size = Dim("batch_size")
+    input_max_length = Dim("input_max_length")
+    dynamic_shapes = {
+        "input_ids": {0: batch_size, 1: input_max_length},
+    }
+
+    torch.onnx.export(
+        model,
+        (dummy_input_ids,),
+        onnx_path,
+        input_names=["input_ids", "attention_mask", "decoder_input_ids"],
+        output_names=["logits"],
+        dynamic_shapes=dynamic_shapes,
+        opset_version=21,
+        dynamo=True,
+        external_data=False,
+    )
+
+    print(f"Exported ONNX model to: {onnx_path}")
+
+    # TODO: Optimize model
+
+elif mode == 'run_onnx':
+    import onnxruntime as ort
+
+    from transformers import BartConfig
+
+    config = BartConfig.from_pretrained(model_dir)
+    tokenizer = get_runtime_tokenizer(config)
+
+    providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    available = ort.get_available_providers()
+    used_providers = [p for p in providers if p in available]
+    if not used_providers:
+        used_providers = ["CPUExecutionProvider"]
+
+    sess = ort.InferenceSession(onnx_path, providers=used_providers)
+    print(f"ONNX providers: {sess.get_providers()}")
+
+    # Input word(s)
+    # Usage:
+    #   python english_to_phonemes.py run_onnx Example
+    # or multiple:
+    #   python english_to_phonemes.py run_onnx "cats dogs"
+    text = sys.argv[2]
+    words = text.split()
+
+
+    def decode_word(word):
+        input_ids = torch.tensor([tokenizer.encode(word)], dtype=torch.long)
+
+        eos_id = tokenizer.eos_token_id
+        # Run ONNX forward.
+        outputs = sess.run(
+            None,
+            {
+                "input_ids": input_ids.numpy(),
+            },
+        )
+        seq = outputs[0]
+        # Get only the first batch.
+        seq = seq[0]
+        print(seq)
+        return tokenizer.decode_phonemes(seq)
+
+
+    for word in words:
+        phonemes = decode_word(word)
+        print(f"{word} -> {phonemes}")
