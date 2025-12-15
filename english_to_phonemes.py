@@ -217,9 +217,9 @@ if mode == 'train':
         encoder_ffn_dim=256,
         decoder_ffn_dim=256,
         encoder_layers=4,  # number of encoder layers
-        decoder_layers=1,  # number of decoder layers
-        encoder_attention_heads=16,  # attention heads in encoder
-        decoder_attention_heads=16,  # attention heads in decoder
+        decoder_layers=2,  # number of decoder layers
+        encoder_attention_heads=4,  # attention heads in encoder
+        decoder_attention_heads=4,  # attention heads in decoder
         decoder_start_token_id=tokenizer.bos_token_id,
         max_position_embeddings=64,
         bos_token_id=tokenizer.bos_token_id,
