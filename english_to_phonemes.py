@@ -239,10 +239,10 @@ if mode == 'train':
         learning_rate=1e-3,
         logging_steps=1000,
         save_strategy="steps",
-        save_steps=2000,
+        save_steps=3000,
         predict_with_generate=True,
         eval_strategy="steps",
-        eval_steps=1000,
+        eval_steps=2000,
     )
 
     data_collator = DataCollatorForSeq2Seq(tokenizer, model=model)
