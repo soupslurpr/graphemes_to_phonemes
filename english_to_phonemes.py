@@ -235,7 +235,8 @@ if mode == 'train':
         torch_compile=True,
         num_train_epochs=2000,
         per_device_train_batch_size=2048,
-        learning_rate=5e-4,
+        # TODO: Try 5e-4 and see if it beats loss 0.0462 and eval_loss 0.011967903934419155 of current learning rate.
+        learning_rate=1e-3,
         logging_steps=1000,
         save_strategy="steps",
         save_steps=2000,
