@@ -6,6 +6,7 @@ import json
 import re
 import sys
 
+import onnxruntime.quantization
 import torch
 from datasets import Dataset
 from torch import nn, Tensor
@@ -326,7 +327,13 @@ elif mode == 'export':
 
     print(f"Exported ONNX model to: {onnx_path}")
 
-    # TODO: Optimize model
+    onnxruntime.quantization.quant_pre_process(
+        onnx_path,
+        onnx_path,
+        skip_symbolic_shape=True,
+    )
+
+    print(f"Optimized ONNX model to: {onnx_path}")
 
 elif mode == 'run_onnx':
     import onnxruntime as ort
